@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ROP Screening — Quick Capture App</title>
+  <style>
+    :root{font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial;}
+    body{margin:0;padding:16px;background:#f7f8fb;color:#111}
+    header{display:flex;gap:12px;align-items:center}
+    h1{font-size:18px;margin:0}
+    .row{display:flex;gap:12px;margin-top:12px}
+    #videoWrap{position:relative;width:100%;max-width:720px;background:#000}
+    video{width:100%;height:auto;background:#000}
+    canvas{display:none}
+    .overlay{position:absolute;left:0;top:0;right:0;bottom:0;pointer-events:none}
+    .crosshair{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:220px;height:220px;border:2px dashed rgba(255,255,255,0.6);border-radius:50%;box-shadow:0 0 0 9999px rgba(0,0,0,0.15) inset}
+    .centerDot{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:10px;height:10px;border-radius:50%;background:#0ff;box-shadow:0 0 12px #0ff}
+    .controls{display:flex;flex-direction:column;gap:8px}
+    label{font-size:13px}
+    input,select,button,textarea{font-size:14px;padding:8px;border-radius:6px;border:1px solid #ddd}
+    button{background:#0b6cff;color:#fff;border:none}
+    .meta{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+    .thumbs{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
+    .thumb{width:120px;height:120px;object-fit:cover;border:1px solid #ccc;border-radius:6px}
+    footer{margin-top:16px;font-size:12px;color:#555}
+    .small{font-size:12px;color:#666}
+    .calRow{display:flex;gap:8px;align-items:center}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>ROP Screening — Quick Capture App</h1>
+    <div class="small">(Single HTML file — open in Chrome/Edge on phone/tablet)</div>
+  </header>
+
+  <div class="row">
+    <div id="videoWrap">
+      <video id="video" autoplay playsinline></video>
+      <div class="overlay">
+        <div class="crosshair" id="crosshair"></div>
+        <div class="centerDot"></div>
+      </div>
+    </div>
+
+    <div class="controls">
+      <div class="meta">
+        <div>
+          <label>Patient ID</label>
+          <input id="pid" placeholder="e.g. 2025-001" />
+        </div>
+        <div>
+          <label>Eye</label>
+          <select id="eye"><option>Right</option><option>Left</option></select>
+        </div>
+        <div>
+          <label>DOB / GA</label>
+          <input id="dob" placeholder="YYYY-MM-DD or GA wks" />
+        </div>
+        <div>
+          <label>Examiner</label>
+          <input id="examiner" placeholder="Your name" />
+        </div>
+      </div>
+
+      <div class="calRow">
+        <label style="min-width:80px">Phone model</label>
+        <input id="phoneModel" placeholder="e.g. Pixel 8" />
+      </div>
+
+      <div class="calRow">
+        <label style="min-width:80px">Target lens distance</label>
+        <input id="targetDist" value="80" style="width:80px"/> <span class="small">mm (editable)</span>
+      </div>
+
+      <div style="display:flex;gap:8px">
+        <button id="captureBtn">Capture</button>
+        <button id="saveMeta">Export CSV</button>
+      </div>
+
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button id="toggleTorch">Toggle Torch</button>
+        <button id="flipCam">Flip Camera</button>
+      </div>
+
+      <div style="margin-top:8px">
+        <label>Quick grading (screening)</label>
+        <select id="grading"><option>Normal / No ROP</option><option>Refer (Prethreshold/Type 1)</option><option>Ungradable / Repeat</option></select>
+      </div>
+
+      <div style="margin-top:8px">
+        <label>Notes</label>
+        <textarea id="notes" rows="4" placeholder="Free text..." ></textarea>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="row">
+    <div style="flex:1">
+      <div class="small">Captured images</div>
+      <div id="thumbs" class="thumbs"></div>
+    </div>
+    <div style="width:320px">
+      <div class="small">Calibration</div>
+      <div style="margin-top:8px" class="small">Drag the circular overlay to match the position of the phone camera in the live preview for this phone model then press <b>Save Calibration</b>. This saves per-model offsets to the browser.</div>
+      <div style="margin-top:8px">
+        <button id="editCross">Edit Overlay Position</button>
+        <button id="saveCal">Save Calibration</button>
+        <button id="clearCal">Clear Cal</button>
+      </div>
+      <div id="calList" style="margin-top:8px" class="small"></div>
+    </div>
+  </div>
+
+  <canvas id="capCanvas"></canvas>
+
+  <footer>
+    <div class="small">How to use: open this file in a modern mobile browser (Chrome/Edge). Allow camera access, place device over infant's eye, align the crosshair over the pupil using the XY controls (or drag overlay), press Capture. Images and metadata are saved locally and can be exported as CSV. This is a screening aid — clinical judgement required.</div>
+  </footer>
+
+  <script>
+    let video = document.getElementById('video');
+    let capCanvas = document.getElementById('capCanvas');
+    let captureBtn = document.getElementById('captureBtn');
+    let thumbs = document.getElementById('thumbs');
+    let phoneModel = document.getElementById('phoneModel');
+    let targetDist = document.getElementById('targetDist');
+    let editCross = document.getElementById('editCross');
+    let saveCal = document.getElementById('saveCal');
+    let clearCal = document.getElementById('clearCal');
+    let calList = document.getElementById('calList');
+    let crosshair = document.getElementById('crosshair');
+    let toggleTorchBtn = document.getElementById('toggleTorch');
+    let flipCamBtn = document.getElementById('flipCam');
+    let saveMetaBtn = document.getElementById('saveMeta');
+
+    let stream = null; let currentFacing = 'environment';
+    let track = null; let imageCapture = null; let torchOn = false;
+    let captured = [];
+
+    async function startCamera(){
+      if(stream){
+        stream.getTracks().forEach(t=>t.stop());
+      }
+      try{
+        stream = await navigator.mediaDevices.getUserMedia({video:{facingMode: currentFacing, width:{ideal:1280}}, audio:false});
+        video.srcObject = stream;
+        track = stream.getVideoTracks()[0];
+        try{ imageCapture = new ImageCapture(track); } catch(e){ imageCapture = null }
+        updateCalList();
+      }catch(e){ alert('Camera error: '+e.message) }
+    }
+
+    startCamera();
+
+    flipCamBtn.onclick = ()=>{ currentFacing = currentFacing==='environment'?'user':'environment'; startCamera(); }
+
+    toggleTorchBtn.onclick = async ()=>{
+      if(!track) return;
+      const cap = track.getCapabilities ? track.getCapabilities() : {};
+      if(!cap.torch){ alert('Torch not supported on this device'); return }
+      try{
+        torchOn = !torchOn;
+        await track.applyConstraints({advanced:[{torch:torchOn}]});
+      }catch(e){ console.warn(e); alert('Toggle torch failed: '+e.message) }
+    }
+
+    captureBtn.onclick = ()=> captureImage();
+
+    function captureImage(){
+      const w = video.videoWidth, h = video.videoHeight;
+      capCanvas.width = w; capCanvas.height = h;
+      const ctx = capCanvas.getContext('2d');
+      ctx.drawImage(video,0,0,w,h);
+      // draw overlay marker
+      const rect = crosshair.getBoundingClientRect();
+      // save image
+      capCanvas.toBlob(blob=>{
+        const url = URL.createObjectURL(blob);
+        const img = document.createElement('img'); img.src = url; img.className='thumb';
+        thumbs.prepend(img);
+        // save metadata
+        const meta = gatherMeta();
+        const reader = new FileReader();
+        reader.onloadend = ()=>{
+          captured.unshift({ts:new Date().toISOString(),imageData:reader.result,meta});
+          // keep last 50
+          if(captured.length>50) captured.pop();
+        }
+        reader.readAsDataURL(blob);
+      },'image/jpeg',0.9);
+    }
+
+    function gatherMeta(){
+      return {
+        patientId: document.getElementById('pid').value,
+        eye: document.getElementById('eye').value,
+        dob: document.getElementById('dob').value,
+        examiner: document.getElementById('examiner').value,
+        phoneModel: phoneModel.value,
+        targetDistMm: targetDist.value,
+        grading: document.getElementById('grading').value,
+        notes: document.getElementById('notes').value
+      }
+    }
+
+    saveMetaBtn.onclick = ()=>{
+      if(captured.length===0){ alert('No captures to export'); return }
+      // build CSV rows
+      let rows = [['timestamp','patientId','eye','dob','examiner','phoneModel','targetDistMm','grading','notes','imageBase64']];
+      for(const c of captured){
+        const m=c.meta; rows.push([c.ts,m.patientId,m.eye,m.dob,m.examiner,m.phoneModel,m.targetDistMm,m.grading,m.notes,c.imageData.replace(/\n/g,'')]);
+      }
+      const csv = rows.map(r=>r.map(cell=>'"'+String(cell).replace(/"/g,'""')+'"').join(',')).join('\n');
+      const blob = new Blob([csv],{type:'text/csv'});
+      const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'rop_captures_'+(new Date().toISOString())+'.csv'; a.click();
+    }
+
+    // Calibration: make crosshair draggable when edit mode on
+    let editMode=false;
+    editCross.onclick = ()=>{ editMode = !editMode; crosshair.style.pointerEvents = editMode? 'auto':'none'; crosshair.style.borderStyle = editMode? 'solid':'dashed'; editCross.textContent = editMode? 'Finish Editing':'Edit Overlay Position' }
+
+    let dragging=false, startX=0, startY=0, startLeft=0, startTop=0;
+    crosshair.addEventListener('pointerdown', (e)=>{ if(!editMode) return; dragging=true; startX=e.clientX; startY=e.clientY; const rc=crosshair.getBoundingClientRect(); startLeft=rc.left; startTop=rc.top; crosshair.setPointerCapture(e.pointerId); });
+    window.addEventListener('pointermove',(e)=>{
+      if(!dragging) return; const dx=e.clientX-startX, dy=e.clientY-startY; const wrap=video.getBoundingClientRect(); let nx=startLeft+dx, ny=startTop+dy; // clamp
+      nx = Math.max(wrap.left, Math.min(wrap.right - crosshair.offsetWidth, nx));
+      ny = Math.max(wrap.top, Math.min(wrap.bottom - crosshair.offsetHeight, ny));
+      crosshair.style.left = ((nx - wrap.left)+crosshair.offsetWidth/2)+'px';
+      crosshair.style.top = ((ny - wrap.top)+crosshair.offsetHeight/2)+'px';
+    });
+    window.addEventListener('pointerup', (e)=>{ dragging=false; });
+
+    saveCal.onclick = ()=>{
+      const model = phoneModel.value || 'unknown';
+      const wrap = video.getBoundingClientRect(); const c = crosshair.getBoundingClientRect();
+      const ox = ( (c.left + c.width/2) - wrap.left) / wrap.width; const oy = ( (c.top + c.height/2) - wrap.top) / wrap.height;
+      const store = JSON.parse(localStorage.getItem('rop_cals')||'{}'); store[model]={ox,oy,dist:targetDist.value}; localStorage.setItem('rop_cals',JSON.stringify(store)); updateCalList(); alert('Saved calibration for "'+model+'"');
+    }
+
+    clearCal.onclick = ()=>{ const model = phoneModel.value || 'unknown'; const store = JSON.parse(localStorage.getItem('rop_cals')||'{}'); delete store[model]; localStorage.setItem('rop_cals',JSON.stringify(store)); updateCalList(); alert('Cleared calibration for "'+model+'"'); }
+
+    function updateCalList(){ const store = JSON.parse(localStorage.getItem('rop_cals')||'{}'); calList.innerHTML = Object.keys(store).length? Object.keys(store).map(m=>m+': ox='+store[m].ox.toFixed(2)+', oy='+store[m].oy.toFixed(2)+', d='+store[m].dist+'mm').join('<br>') : 'No calibrations saved'; }
+
+    // on load, attempt to apply calibration
+    phoneModel.addEventListener('change', applyCal);
+    phoneModel.addEventListener('blur', applyCal);
+    function applyCal(){ const model = phoneModel.value || 'unknown'; const store = JSON.parse(localStorage.getItem('rop_cals')||'{}'); if(store[model]){
+      const wrap = video.getBoundingClientRect(); const ox = store[model].ox, oy = store[model].oy; // position crosshair
+      // convert to pixels
+      crosshair.style.left = (ox*wrap.width)+'px'; crosshair.style.top = (oy*wrap.height)+'px'; targetDist.value = store[model].dist;
+    }}
+
+    // resize observer to keep overlay centered on resizes
+    let ro = new ResizeObserver(()=>{ if(!editMode){ crosshair.style.left='50%'; crosshair.style.top='50%'; crosshair.style.transform='translate(-50%,-50%)' } });
+    ro.observe(document.getElementById('videoWrap'));
+
+    // quick safety: warn user about storage clearing on reload
+    window.addEventListener('beforeunload', (e)=>{ if(captured.length){ e.returnValue = 'You have unsaved captures — export CSV before leaving.' } });
+
+  </script>
+</body>
+</html>
